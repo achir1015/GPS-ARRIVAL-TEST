@@ -743,46 +743,97 @@ function deleteTester(id) {
    地址自動查座標（OpenStreetMap Nominatim）
    類比：把地址交給免費郵差，他回傳 GPS 釘
 ════════════════════════════════ */
+/* ── 台灣地址查座標：ArcGIS World Geocoder（主）+ Nominatim（備）
+   ArcGIS 格式：candidates[0].location.x(經度) / .y(緯度)
+   類比：先找最準的快遞(ArcGIS)，找不到再改用備用快遞(OSM) ── */
+
+/* --- Nominatim 逐步縮短策略（備用） --- */
+function buildTWFallbacks(addr) {
+  const tries = [addr];
+  let a;
+  a = addr.replace(/之\d+號/, '號');
+  if (a !== addr) tries.push(a);
+  a = addr.replace(/\d+之?\d*號.*$/, '').trim();
+  if (a && !tries.includes(a)) tries.push(a);
+  a = addr.replace(/\d+弄.*$/, '').trim();
+  if (a && !tries.includes(a)) tries.push(a);
+  a = addr.replace(/\d+巷.*$/, '').trim();
+  if (a && !tries.includes(a)) tries.push(a);
+  a = addr.replace(/\d+段.*$/, '').trim();
+  if (a && !tries.includes(a)) tries.push(a);
+  const m = addr.match(/^(.{2,4}[縣市].{2,4}[鄉鎮市區])/);
+  if (m) tries.push(m[1]);
+  return tries;
+}
+
 async function geocodeAddress() {
-  const addr=document.getElementById('req-f-addr').value.trim();
-  const stat=document.getElementById('geo-status');
-  const btn=document.getElementById('geo-btn');
+  const addr = document.getElementById('req-f-addr').value.trim();
+  const btn  = document.getElementById('geo-btn');
   if (!addr) { setStatus('geo-status','⚠ 請先輸入地址','err'); return; }
-  btn.disabled=true;
-  stat.innerHTML='<span class="spinner"></span>  查詢中…';
-  stat.className='status-bar';
+  btn.disabled = true;
+  document.getElementById('geo-status').innerHTML = '<span class="spinner"></span>  查詢中（ArcGIS 台灣門牌資料庫）…';
+  document.getElementById('geo-status').className = 'status-bar';
+
   try {
-    // 加上 Taiwan 提高台灣地址辨識率
-    const q=encodeURIComponent(addr.includes('台')||addr.includes('臺') ? addr+' Taiwan' : addr);
-    const url=`https://nominatim.openstreetmap.org/search?q=${q}&format=json&limit=3&countrycodes=tw`;
-    const res=await fetch(url, { headers:{'User-Agent':'GPS-ArrivalTest/2.0'} });
-    const data=await res.json();
-    if (!data||!data.length) {
-      // 找不到時再試不加 Taiwan
-      const url2=`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(addr)}&format=json&limit=3`;
-      const res2=await fetch(url2, { headers:{'User-Agent':'GPS-ArrivalTest/2.0'} });
-      const data2=await res2.json();
-      if (!data2||!data2.length) {
-        setStatus('geo-status','❌ 找不到此地址，請調整後重試（建議加上縣市名）','err');
-        btn.disabled=false; return;
-      }
-      fillCoords(data2[0]); return;
+    /* ── 第一優先：ArcGIS World Geocoding（不需 API Key，forStorage=false）
+       回傳格式：candidates[0].location.x=經度, .y=緯度, score=吻合分數 ── */
+    const arcgisUrl =
+      'https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates' +
+      '?f=json&forStorage=false&sourceCountry=TWN&maxLocations=3&outFields=Addr_type,StAddr,City' +
+      '&SingleLine=' + encodeURIComponent(addr);
+
+    const arcRes  = await fetch(arcgisUrl);
+    const arcData = await arcRes.json();
+
+    if (arcData.candidates && arcData.candidates.length > 0 && arcData.candidates[0].score >= 60) {
+      const best = arcData.candidates[0];
+      const lat  = parseFloat(best.location.y).toFixed(6); // y = 緯度
+      const lon  = parseFloat(best.location.x).toFixed(6); // x = 經度
+      document.getElementById('req-f-lat').value = lat;
+      document.getElementById('req-f-lon').value = lon;
+      const addrType = best.attributes && best.attributes.Addr_type ? best.attributes.Addr_type : '';
+      const scoreStr = best.score ? `（吻合度 ${best.score.toFixed(1)}分）` : '';
+      const typeNote = addrType === 'PointAddress' ? '✅ 精確門牌定位' :
+                       addrType === 'StreetAddress' ? '⚠ 路段定位（非精確門牌）' : addrType;
+      setStatus('geo-status',
+        `${typeNote} ${scoreStr}\n緯度 ${lat}  /  經度 ${lon}`,
+        addrType === 'PointAddress' ? 'ok' : 'ok');
+      btn.disabled = false; return;
     }
-    fillCoords(data[0]);
+
+    /* ── 第二備用：Nominatim（OSM）+ 逐步縮短策略 ── */
+    document.getElementById('geo-status').innerHTML =
+      '<span class="spinner"></span>  ArcGIS 未匹配，改用 OpenStreetMap 備用查詢…';
+    const fallbacks = buildTWFallbacks(addr);
+    let found = null, usedQuery = '';
+    for (const q of fallbacks) {
+      const url  = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q+' Taiwan')}&format=json&limit=3&countrycodes=tw`;
+      const res  = await fetch(url, { headers:{'User-Agent':'GPS-ArrivalTest/2.0'} });
+      const data = await res.json();
+      if (data && data.length) { found = data[0]; usedQuery = q; break; }
+      await new Promise(r => setTimeout(r, 350));
+    }
+
+    if (!found) {
+      setStatus('geo-status',
+        '❌ 兩個資料庫均找不到此地址。建議：至 Google Maps 右鍵點該地址位置→複製座標，再手動填入緯度／經度欄位。',
+        'err');
+      btn.disabled = false; return;
+    }
+
+    const lat2 = parseFloat(found.lat).toFixed(6);
+    const lon2 = parseFloat(found.lon).toFixed(6);
+    document.getElementById('req-f-lat').value = lat2;
+    document.getElementById('req-f-lon').value = lon2;
+    const isApprox = usedQuery !== addr;
+    const note = isApprox
+      ? `\n⚠ 以「${usedQuery}」近似定位，建議手動微調至正確門牌。`
+      : '';
+    setStatus('geo-status', `✅ OSM 定位 ── 緯度 ${lat2}  /  經度 ${lon2}${note}`, 'ok');
   } catch(e) {
     setStatus('geo-status','❌ 網路錯誤：'+e.message,'err');
   }
-  btn.disabled=false;
-}
-
-function fillCoords(result) {
-  const lat=parseFloat(result.lat).toFixed(6);
-  const lon=parseFloat(result.lon).toFixed(6);
-  document.getElementById('req-f-lat').value=lat;
-  document.getElementById('req-f-lon').value=lon;
-  const dispName=result.display_name||'';
-  setStatus('geo-status',`✅ 緯度 ${lat}  /  經度 ${lon}\n${dispName.substring(0,80)}${dispName.length>80?'…':''}`, 'ok');
-  document.getElementById('geo-btn').disabled=false;
+  btn.disabled = false;
 }
 
 /* ════════════════════════════════
