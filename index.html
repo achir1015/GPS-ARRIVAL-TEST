@@ -580,22 +580,58 @@ function doPunch() {
 }
 
 function onGotPosition(pos) {
-  const myLat=pos.coords.latitude, myLon=pos.coords.longitude;
-  const reqId=document.getElementById('sel-request').value;
-  const req=requesters.find(r=>r.requestId===reqId);
-  const dist=haversine(myLat,myLon,req.latitude,req.longitude);
-  const thresh=req.distanceThreshold;
-  const arrived=dist<=thresh;
-  const now=new Date(), dateStr=formatDate(now), timeStr=formatTime(now);
-  const dk=dateStr.replace(/-/g,'');
-  const recordId=genSerial(dk);
-  records.push({ recordId, requestId:reqId, testerId:document.getElementById('sel-tester').value, testDate:dateStr, testTime:timeStr, myLatitude:myLat, myLongitude:myLon, distance:parseFloat(dist.toFixed(2)), threshold:thresh, arrived });
-  saveRecords();
-  updateMapAfterPunch(myLat, myLon);
-  showResult(arrived, dist, thresh, myLat, myLon, timeStr);
-  const stat=document.getElementById('punch-status');
-  stat.textContent=`✅ 已記錄  ──  記錄編號：${recordId}`; stat.className='status-bar ok';
-  document.getElementById('punch-btn').disabled=false;
+  // ── finally 確保無論如何按鈕都會恢復，不會卡住 ──
+  const btn  = document.getElementById('punch-btn');
+  const stat = document.getElementById('punch-status');
+  try {
+    const myLat = pos.coords.latitude;
+    const myLon = pos.coords.longitude;
+
+    // 取得需求者資料
+    const reqId = document.getElementById('sel-request').value;
+    const req   = requesters.find(r => r.requestId === reqId);
+    if (!req) throw new Error('找不到需求者資料，請重新選擇');
+
+    // 距離計算與判定
+    const dist    = haversine(myLat, myLon, req.latitude, req.longitude);
+    const thresh  = req.distanceThreshold;
+    const arrived = dist <= thresh;
+
+    // 時間戳記與流水號
+    const now      = new Date();
+    const dateStr  = formatDate(now);
+    const timeStr  = formatTime(now);
+    const dk       = dateStr.replace(/-/g, '');
+    const recordId = genSerial(dk);
+
+    // 寫入記錄
+    records.push({
+      recordId, requestId: reqId,
+      testerId:    document.getElementById('sel-tester').value,
+      testDate:    dateStr, testTime: timeStr,
+      myLatitude:  myLat,  myLongitude: myLon,
+      distance:    parseFloat(dist.toFixed(2)),
+      threshold:   thresh, arrived
+    });
+    saveRecords();
+
+    // 顯示結果
+    showResult(arrived, dist, thresh, myLat, myLon, timeStr);
+    stat.textContent = `✅ 已記錄  ──  記錄編號：${recordId}`;
+    stat.className   = 'status-bar ok';
+
+    // 更新地圖（獨立 try，地圖錯誤不影響打卡主流程）
+    try { updateMapAfterPunch(myLat, myLon); } catch(mapErr) { console.warn('地圖更新失敗:', mapErr); }
+
+  } catch(err) {
+    // 打卡流程發生錯誤時顯示訊息
+    stat.textContent = '❌ 打卡失敗：' + err.message;
+    stat.className   = 'status-bar err';
+    console.error('onGotPosition error:', err);
+  } finally {
+    // 無論成功或失敗，按鈕一定解鎖
+    btn.disabled = false;
+  }
 }
 
 function onGeoError(err) {
